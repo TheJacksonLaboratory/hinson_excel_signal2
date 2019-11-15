@@ -1,0 +1,6 @@
+.ipynb*
+*.xls*
+.vscode
+.DS_Store
+
+
