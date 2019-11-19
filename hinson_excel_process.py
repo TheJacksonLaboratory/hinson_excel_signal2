@@ -79,8 +79,16 @@ def create_baseline(series):
 
     # If if the first peak starts at 0, it is probably cut off. In that case,
     # take the second peak.
-    if peaks[1]['left_bases'][0] == 0:
+    if len(peaks[0]) == 0:
+        logging.warning('BASELINE: No peaks found, setting baseline to 0')
+        return np.float(0)
+
+    if peaks[1]['left_bases'][0] == 0 and len(peaks[0]) > 1:
         peak_index = 1
+    elif peaks[1]['left_bases'][0] == 0 and len(peaks[0]) == 1:
+        peak_index = 0
+        logging.warning('BASELINE: Signal only contains one peak,'
+                        ' which starts at 0')
     else:
         peak_index = 0
 
@@ -104,8 +112,16 @@ def normalize_df(series):
 
 def first_good_peak(peaks):
     """return only the relevant peak information in the form of a dict."""
-    if peaks[1]['left_bases'][0] == 0:
+    
+    if len(peaks[0]) == 0:
+        logging.warning('FIRST_PEAK: No peaks found, returning empty peak information')
+        return {'peak': 0, 'left': 0, 'right': 0} 
+    
+    if peaks[1]['left_bases'][0] == 0 and len(peaks[0]) > 1:
         peak_index = 1
+    elif peaks[1]['left_bases'][0] == 0 and len(peaks[0]) == 1:
+        peak_index = 0
+        logging.warning('FIRST_PEAK: Signal only contains one peak, which starts at 0')
     else:
         peak_index = 0
         
@@ -131,6 +147,10 @@ def get_half_max_up(signal, peak):
     -------
         half_max_up: floating point number
     """
+    # If no peaks, return nothing
+    if peak['peak'] == 0:
+        return np.nan
+    
     fflag = False # does this method fail?
     # Take half the value of the signal at the peak index
     half_max = signal[peak['peak']] / 2
@@ -142,6 +162,9 @@ def get_half_max_up(signal, peak):
 
     # Find the index of the signal sample closest to half_max
     closest_idx = (np.abs(rising_signal - half_max)).argmin() + peak['left']
+    if closest_idx <= 1 or closest_idx >= 98:
+        logging.warning('HM_UP: half-max too close to end of signal')
+        return np.nan
 
     # If the signal at the index is nearly equal to half max, take that index 
     if np.allclose(half_max, signal[closest_idx]):
@@ -156,7 +179,7 @@ def get_half_max_up(signal, peak):
         elif triplet[1] < half_max < triplet[2]:
             ix = 1
         else:
-            logging.warning('simple method for interpolating half-max'
+            logging.warning('HM_UP: simple method for interpolating half-max'
                             ' rise time failed')
             fflag = True
         if ix != -1:
@@ -193,10 +216,17 @@ def get_half_max_down(signal, peak):
 
     This is a minor modification of the above function.
     """
+    if peak['peak'] == 0:
+        return np.nan
     fflag = False
     half_max = signal[peak['peak']] / 2
     falling_signal = signal[peak['peak']:(peak['right']+1)]
     closest_idx = (np.abs(falling_signal - half_max)).argmin() + peak['peak']
+
+    if closest_idx <= 1 or closest_idx >= 98:
+        logging.warning('HM_DOWN: half-max too close to end of signal')
+        return np.nan
+
     # If the signal at the index is nearly equal to half max, take that index 
     if np.allclose(half_max, signal[closest_idx]):
         half_max_point = closest_idx
@@ -210,7 +240,7 @@ def get_half_max_down(signal, peak):
         elif triplet[1] > half_max > triplet[2]:
             ix = 1
         else:
-            logging.warning('simple method for interpolating'
+            logging.warning('HM_DOWN: simple method for interpolating'
                             ' half-max decay time failed')
             fflag = True
         if ix != -1:
