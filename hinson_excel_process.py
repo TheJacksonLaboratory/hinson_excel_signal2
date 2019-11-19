@@ -6,7 +6,9 @@
 # left to right.
 #
 # Output is a copy of the original xlsx file with appended columns of
-# summary data. Summaries are of the first peak, normalized as deltaf/f.
+# summary data. Summaries are of the first peak.
+#
+# 
 #
 # Summary columns:
 #     -peak_magnitude: magnitude of signal at peak
@@ -14,8 +16,11 @@
 #     -peak_duration: interval (n time samples) between left and right base
 #     -rise: interval between left base and peak
 #     -decay: interval between peak and right base
-#     -half_max_up: interpolated timepoint when signal is half peak value
+#     -half_max_up: interpolated timepoint when increasing signal is half peak
+#                   value.
 #     -peak_values: signal between left and right base, with padding
+#     - half_max_down: interpolated timepoint when decreasing signal is half
+#                      peak value.
 
 
 import logging
@@ -126,6 +131,7 @@ def get_half_max_up(signal, peak):
     -------
         half_max_up: floating point number
     """
+    fflag = False # does this method fail?
     # Take half the value of the signal at the peak index
     half_max = signal[peak['peak']] / 2
 
@@ -143,20 +149,26 @@ def get_half_max_up(signal, peak):
 
     # ...otherwise interpolate
     else:
+        ix = -1
         triplet = signal[(closest_idx - 1):(closest_idx + 2)]
         if triplet[0] < half_max < triplet[1]:
             ix = 0
         elif triplet[1] < half_max < triplet[2]:
             ix = 1
         else:
-            message = 'current method for interpolating half max time failed'
-            raise Exception(message)
-        y = [ix,ix+1]
-        x = [triplet[ix], triplet[ix+1]]
-        f = interp1d(x,y)
-        trip_coord = f(half_max)
-        half_max_point = closest_idx + (trip_coord - 1)
-    half_max_up = float(half_max_point - peak['left'])
+            logging.warning('simple method for interpolating half-max'
+                            ' rise time failed')
+            fflag = True
+        if ix != -1:
+            y = [ix,ix+1]
+            x = [triplet[ix], triplet[ix+1]]
+            f = interp1d(x,y)
+            trip_coord = f(half_max)
+            half_max_point = closest_idx + (trip_coord - 1)
+    if fflag == True:
+        half_max_up = np.nan
+    else:
+        half_max_up = float(half_max_point - peak['left'])
     return half_max_up
 
 # The next two functions are to break the peak values out into new 
@@ -177,27 +189,102 @@ def create_peak_value_df(peak_values):
     return peak_value_df
 
 def get_half_max_down(signal, peak):
-    """TYPE YOUR CODE HERE
-    Find the index of the point in the downslope of the peak
-    that is closest to the half max value
-    """
+    """See `get_half_max_up` for explanation.
 
+    This is a minor modification of the above function.
+    """
+    fflag = False
+    half_max = signal[peak['peak']] / 2
+    falling_signal = signal[peak['peak']:(peak['right']+1)]
+    closest_idx = (np.abs(falling_signal - half_max)).argmin() + peak['peak']
+    # If the signal at the index is nearly equal to half max, take that index 
+    if np.allclose(half_max, signal[closest_idx]):
+        half_max_point = closest_idx
+
+    # ...otherwise interpolate
+    else:
+        ix = -1
+        triplet = signal[(closest_idx - 1):(closest_idx + 2)]
+        if triplet[0] > half_max > triplet[1]:
+            ix = 0
+        elif triplet[1] > half_max > triplet[2]:
+            ix = 1
+        else:
+            logging.warning('simple method for interpolating'
+                            ' half-max decay time failed')
+            fflag = True
+        if ix != -1:
+            y = [ix,ix+1]
+            x = [triplet[ix], triplet[ix+1]]
+            f = interp1d(x,y)
+            trip_coord = f(half_max)
+            half_max_point = closest_idx + (trip_coord - 1)
+    if fflag == True:
+        half_max_down = np.nan
+    else:
+        half_max_down = float(half_max_point - peak['peak'])
     return half_max_down
 
-def main(fp):
+def flip_signal(signal, flag):
+    if flag:
+        signal = -(signal - signal.max())
+    return signal
+
+def main(fp, df_flag, c_flag):
+    if df_flag == c_flag:
+        logging.error("You must use EITHER the --deltaf OR --contraction flag;"
+                      " Doing nothing." )
+        return
+
     try:
         df = pd.read_excel(fp)
     except FileNotFoundError:
-        logging.error(f"No file found called \"{fp}\", try using absolute path or checking your working directory")
+        logging.error(f"No file found called \"{fp}\", try using absolute path"
+                        "or checking your working directory")
         return
     outfn = ".".join(basename(fp).split('.')[:-1]) + '_processed.xlsx'
 
-    signals = df.loc[:, 't1':'t99'] #consider making this configurable
+    try:
+        signals = df.loc[:, 't0':'t99'] #consider making this configurable
+    except:
+        logging.error("Spreadsheet is improperly formatted; doing nothing.")
+        return
+
     smoothed = signals.apply(smooth_signal, axis=1, window_size=3)
-    baselines = [create_baseline(series) for series in smoothed]
-    deltaf_f = [deltaf(series, baseline) for series, baseline in zip(smoothed, baselines)]
-    norm_df = [normalize_df(series) for series in deltaf_f]
-    peaks = [find_peaks(series, prominence=0.2, wlen=35) for series in norm_df]
+
+    if c_flag:
+        try:
+            orientations = df.Replicate
+        except:
+            logging.error("Replicate column required for contraction data;"
+                          " doing nothing.")
+            return
+
+        orientations = orientations.astype('category')
+        if set(['Bottom', 'Top']) != set(orientations.dtypes.categories):
+            logging.error("Replicate values must be in ['Bottom', 'Top'];"
+                          " doing nothing.")
+            return
+        
+        #flip the smoothed signals if necessary
+        for idx, orientation in enumerate(orientations):
+            if orientation == 'Bottom':
+                smoothed[idx] = -(smoothed[idx] - smoothed[idx].max())
+
+    baselines = smoothed.apply(create_baseline)
+
+    if df_flag:
+        proc_sig = pd.Series([deltaf(series, baseline)
+                              for series, baseline
+                              in zip(smoothed, baselines)])
+
+    else:
+        proc_sig = pd.Series([(series - baseline)
+                              for series, baseline
+                              in zip(smoothed, baselines)])
+
+    norm_sig = [normalize_df(series) for series in proc_sig]
+    peaks = [find_peaks(series, prominence=0.2, wlen=35) for series in norm_sig]
     target_peaks = [first_good_peak(p) for p in peaks]
 
     peak_magnitude = []
@@ -208,7 +295,7 @@ def main(fp):
     half_max_up = []
     peak_values = []
     half_max_down = []
-    for peak, signal in zip(target_peaks, deltaf_f):
+    for peak, signal in zip(target_peaks, proc_sig):
         peak_magnitude.append(signal[peak['peak']])
         peak_duration.append(peak['right'] - peak['left'])
         rise.append(peak['peak'] - peak['left'])
@@ -231,12 +318,21 @@ def main(fp):
 
     with pd.ExcelWriter(outfn) as writer:
         output_df.to_excel(writer)
-    
+        logging.info(f'Writing output file as {outfn}')
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    # Command line help and argument parsing
     description = ("Process xlsx files containing Hinson lab calcium data, "
                    "see script header for details")
     parser = ArgumentParser(description=description)
-    parser.add_argument('file', type=str, help='Path to the *.xlsx file containing signal data')
+    parser.add_argument('file', type=str,
+                        help='Path to the *.xlsx file containing signal data')
+    parser.add_argument('--deltaf', action='store_true',
+                        help='Flag to indicate deltaf/f should be calculated')
+    parser.add_argument('--contraction', action='store_true',
+                        help='Flag to indicate contraction data is to be'
+                             'processed')
     args = parser.parse_args()
-    fp = args.file
-    main(fp)
+
+    main(fp=args.file, df_flag=args.deltaf, c_flag=args.contraction)
